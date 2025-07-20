@@ -118,25 +118,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user_data(user_data)
         return
 
-    await update.message.reply_text(f"Merhaba {first_name}! {hak_kaldi} kupon hakkın var, çekiliyor...")
+    cekilecek = min(hak_kaldi, 5)  # En fazla 5 kupon çekecek
 
-    basari = 0
+    await update.message.reply_text(f"Merhaba {first_name}! {cekilecek} kupon hakkın var, çekiliyor...")
+
     kuponlar = []
-    for _ in range(hak_kaldi):
+    basari = 0
+    for _ in range(cekilecek):
         result = await get_coupon()
         if result:
             basari += 1
             kuponlar.append(result)
             user_data[uid]["daily_count"] += 1
             user_data[uid]["total_count"] += 1
-            save_user_data(user_data)
         else:
             break
 
     if basari == 0:
         await update.message.reply_text("❌ Hiç kupon alınamadı veya limit dolmuş olabilir.")
     else:
-        # Tek mesajda tüm kuponları gönder
+        # Tüm kuponları tek mesajda topluca gönderiyoruz
         await update.message.reply_text("🎉 Kuponlar:\n" + "\n".join(kuponlar))
 
     save_user_data(user_data)
