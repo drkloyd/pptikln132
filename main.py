@@ -3,14 +3,11 @@ import json
 import logging
 import uuid
 import re
-import requests
 from datetime import datetime
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes,
-    MessageHandler, filters
-)
+from telegram.ext import (ApplicationBuilder, CommandHandler,
+                          ContextTypes, MessageHandler, filters)
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
@@ -25,27 +22,29 @@ priority_users = set(os.getenv("PRIORITY_USERS", "").split(","))
 MAX_NORMAL = 5
 MAX_PRIORITY = 20
 
-# --- VERİ YÜKLEME VE KAYDETME ---
+
 def load_user_data():
     if os.path.exists(USER_DATA_FILE):
         with open(USER_DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
+
 def save_user_data(data):
     with open(USER_DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
+
 user_data = load_user_data()
 
-# --- ESCAPE ---
+
 def escape_markdown(text):
     if not text:
         return ""
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
-# --- KUPON ÇEKME ---
+
 async def get_coupon():
     headers = {
         "Content-Type": "application/json",
@@ -65,12 +64,12 @@ async def get_coupon():
         reward = json_data["reward_info"]["reward"]
         coupon = reward.get("coupon_code")
         campaign = reward.get("campaign_name", "Bilinmeyen Ödül")
-        return f"🎁 Kupon: {coupon} | Ödül: {campaign}" if coupon else None
+        return f" 🎁 Kupon:🎁 {coupon} | Ödül: {campaign}" if coupon else None
     except Exception as e:
         logging.error(f"Kupon alınırken hata: {e}")
         return None
 
-# --- BAŞLANGIÇ KOMUTU ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = str(user.id)
@@ -121,7 +120,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_user_data(user_data)
             await update.message.reply_text(result)
         else:
-            await update.message.reply_text("❌ Kupon alınamadı. Limit dolmuş olabilir.")
+            await update.message.reply_text("❌ Kupon alınamadı. Limit dolmuş olabilir veya sunucu problemi var.")
             break
 
     if basari == 0:
@@ -129,40 +128,55 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"✅ Toplam {basari} kupon başarıyla alındı.")
 
-# --- GÜNLÜK HAK SIFIRLAMA ---
+
+async def loglar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_ID:
+        await update.message.reply_text("Bu komut yalnızca admin tarafından kullanılabilir.")
+        return
+    log_text = "\n".join([
+        f"🆔 {d['id']} | 👤 {d['first_name']} {d['last_name']} | @{d['username']}\nMesajlar: {d.get('messages', [])}\n" for d in user_data.values()
+    ])
+    await update.message.reply_text(log_text[:4000])
+
+
+async def aktif_kullanicilar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_ID:
+        await update.message.reply_text("Bu komut yalnızca admin tarafından kullanılabilir.")
+        return
+    aktif = [u for u in user_data.values() if u['daily_count'] > 0]
+    text = f"🔍 Bugün kupon çeken {len(aktif)} aktif kullanıcı var."
+    await update.message.reply_text(text)
+
+
+async def istatistik(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != ADMIN_ID:
+        await update.message.reply_text("Bu komut yalnızca admin tarafından kullanılabilir.")
+        return
+    toplam_kullanici = len(user_data)
+    toplam_kupon = sum(u["total_count"] for u in user_data.values())
+    text = f"📊 Toplam Kullanıcı: {toplam_kullanici}\n🎟️ Toplam Kupon Alımı: {toplam_kupon}"
+    await update.message.reply_text(text)
+
+
 def reset_daily_counts():
     for uid in user_data:
         user_data[uid]["daily_count"] = 0
     save_user_data(user_data)
     print(f"[{datetime.now()}] ✅ Günlük haklar sıfırlandı.")
 
-# --- /loglar KOMUTU ---
-async def loglar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_ID:
-        await update.message.reply_text("⛔ Bu komut sadece yöneticilere özeldir.")
-        return
 
-    text = "🧾 *Kullanıcı Logları:*\n"
-    for uid, info in user_data.items():
-        text += f"\n👤 *{info.get('first_name', '')} {info.get('last_name', '')}* (@{info.get('username', '')})\n"
-        text += f"🆔 ID: `{uid}`\n"
-        text += f"🌍 Dil: `{info.get('language_code', '')}`\n"
-        text += f"📊 Toplam: {info.get('total_count', 0)}, Bugün: {info.get('daily_count', 0)}\n"
-        if info.get("messages"):
-            last_msg = info["messages"][-1]
-            text += f"💬 Son Mesaj: `{escape_markdown(last_msg)}`\n"
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-# --- SCHEDULER KURULUM ---
 scheduler = BackgroundScheduler(timezone="Europe/Istanbul")
 scheduler.add_job(reset_daily_counts, "cron", hour=10, minute=10)
 scheduler.start()
 
-# --- BOTU ÇALIŞTIR ---
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("loglar", loglar))
+    app.add_handler(CommandHandler("istatistik", istatistik))
+    app.add_handler(CommandHandler("aktifkullanicilar", aktif_kullanicilar))
+
     app.run_polling()
