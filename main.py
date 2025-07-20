@@ -50,6 +50,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = user.language_code or ""
     last_msg = update.message.text if update.message else ""
 
+    max_rights = MAX_PRIORITY if username in priority_users else MAX_NORMAL
+
     if uid not in user_data:
         user_data[uid] = {
             "id": uid,
@@ -62,42 +64,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "messages": []
         }
 
-    # Her start mesajını kaydet
+    # Mesaj kaydet
     if last_msg:
         user_data[uid]["messages"].append({
             "text": last_msg,
             "date": datetime.utcnow().isoformat()
         })
 
-    save_user_data(user_data)
-    await update.message.reply_text(f"Merhaba {first_name}! Hoş geldin.")
+    hak_kaldi = max_rights - user_data[uid]["daily_count"]
+    if hak_kaldi <= 0:
+        await update.message.reply_text(f"👋 {first_name}, günlük hakkın doldu! ({max_rights} kupon)")
+        save_user_data(user_data)
+        return
 
-# Her kullanıcıdan gelen mesajı kaydet
-async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    uid = str(user.id)
-    username = user.username or f"id_{uid}"
-    first_name = user.first_name or ""
-    last_name = user.last_name or ""
-    lang = user.language_code or ""
-    text = update.message.text or ""
+    await update.message.reply_text(f"Merhaba {first_name}! {hak_kaldi} kupon hakkın var, çekiliyor...")
 
-    if uid not in user_data:
-        user_data[uid] = {
-            "id": uid,
-            "username": username,
-            "first_name": first_name,
-            "last_name": last_name,
-            "language_code": lang,
-            "daily_count": 0,
-            "total_count": 0,
-            "messages": []
-        }
+    basari = 0
+    for _ in range(hak_kaldi):
+        result = await get_coupon()
+        if result:
+            basari += 1
+            user_data[uid]["daily_count"] += 1
+            user_data[uid]["total_count"] += 1
+            save_user_data(user_data)
+            await update.message.reply_text(result)
+        else:
+            await update.message.reply_text("❌ Kupon alınamadı. Limit dolmuş olabilir veya sunucu problemi var.")
+            break
 
-    user_data[uid]["messages"].append({
-        "text": text,
-        "date": datetime.utcnow().isoformat()
-    })
+    if basari == 0:
+        await update.message.reply_text("❌ Hiç kupon alınamadı.")
+    else:
+        await update.message.reply_text(f"✅ Toplam {basari} kupon başarıyla alındı.")
+
     save_user_data(user_data)
 
 # /loglar komutu (sadece admin)
