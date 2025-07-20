@@ -3,7 +3,6 @@ import json
 import logging
 import uuid
 import re
-import pprint
 import requests
 from datetime import datetime
 from telegram import Update
@@ -124,6 +123,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"✅ Toplam {basari} kupon başarıyla alındı.")
 
+# Yeni komutlar
+
+async def gunluklog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.now().strftime("%Y-%m-%d")
+    log_lines = []
+    for user in user_data.values():
+        if user["daily_count"] > 0:
+            log_lines.append(f"📌 {user['username']} - {user['daily_count']} kupon")
+    msg = "\n".join(log_lines) or "Bugün henüz kupon çeken yok."
+    await update.message.reply_text(f"📅 {today} Günlük Log:\n\n{msg}")
+
+async def aktifkullanicilar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    aktif = [u["username"] for u in user_data.values() if u["daily_count"] > 0]
+    msg = "\n".join(f"👤 @{k}" for k in aktif) or "Aktif kullanıcı yok."
+    await update.message.reply_text(f"🔎 Aktif Kullanıcılar:\n\n{msg}")
+
+async def istatistik(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    toplam = sum(u["total_count"] for u in user_data.values())
+    kisi = len(user_data)
+    await update.message.reply_text(f"📊 Toplam {kisi} kullanıcı {toplam} kupon aldı.")
+
+async def loglar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    loglar = []
+    for u in user_data.values():
+        loglar.append(f"👤 @{u['username']} - Toplam: {u['total_count']} | Bugün: {u['daily_count']}")
+    await update.message.reply_text("\n".join(loglar) or "Henüz veri yok.")
+
+# Günlük sıfırlama
 def reset_daily_counts():
     for uid in user_data:
         user_data[uid]["daily_count"] = 0
@@ -138,5 +165,11 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Komutlar
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("gunluklog", gunluklog))
+    app.add_handler(CommandHandler("aktifkullanicilar", aktifkullanicilar))
+    app.add_handler(CommandHandler("istatistik", istatistik))
+    app.add_handler(CommandHandler("loglar", loglar))
+
     app.run_polling()
