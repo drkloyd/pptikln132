@@ -4,3 +4,5 @@ services:
     runtime: python
     buildCommand: ""
     startCommand: python Main.py
+environment:
+  pythonVersion: 3.11.9
