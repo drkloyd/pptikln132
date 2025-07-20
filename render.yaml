@@ -1,0 +1,6 @@
+services:
+  - type: worker
+    name: telegram-kupon-bot
+    runtime: python
+    buildCommand: ""
+    startCommand: python Main.py
