@@ -3,6 +3,7 @@ import json
 import logging
 import uuid
 import re
+import requests
 from datetime import datetime
 from telegram import Update
 from telegram.constants import ParseMode
@@ -16,21 +17,19 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
+COUPON_URL = os.getenv("COUPON_URL")
 USER_DATA_FILE = os.getenv("USER_DATA_FILE", "kullanici_sayac.json")
+priority_users = set(os.getenv("PRIORITY_USERS", "").split(","))
 
 MAX_NORMAL = 5
 MAX_PRIORITY = 20
 
-priority_users = set(os.getenv("PRIORITY_USERS", "").split(","))
-
-# JSON dosyasından kullanıcı verisini yükle
 def load_user_data():
     if os.path.exists(USER_DATA_FILE):
         with open(USER_DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
-# JSON dosyasına kullanıcı verisini kaydet
 def save_user_data(data):
     with open(USER_DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -43,10 +42,46 @@ def escape_markdown(text):
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
-# Örnek kupon alma fonksiyonu, ihtiyacına göre güncelle
+# Kupon alma fonksiyonu (senin verdiğin requests kodundan dönüştürüldü)
 async def get_coupon():
-    # Burada asenkron istek yapabilirsin. Şimdilik dummy dönüş:
-    return "🎁 Kupon Kodu: EXAMPLE123"
+    headers = {
+        "Accept": "*/*",
+        "Accept-Language": "tr,en;q=0.9,en-GB;q=0.8,en-US;q=0.7",
+        "Connection": "keep-alive",
+        "Content-Type": "application/json",
+        "Origin": "https://tiklagelsin.game.core.tiklaeslestir.zuzzuu.com",
+        "Referer": "https://tiklagelsin.game.core.tiklaeslestir.zuzzuu.com/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0",
+        "sec-ch-ua": '"Chromium";v="136", "Microsoft Edge";v="136", "Not.A/Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"'
+    }
+
+    data = {
+        "game_name": "tikla-eslestir",
+        "event_name": "oyun_tamamlandi",
+        "user_id": "",
+        "session_id": str(uuid.uuid4()),
+        "user_segment": "",
+        "user_name": ""
+    }
+
+    try:
+        response = requests.post(COUPON_URL, headers=headers, data=json.dumps(data), timeout=10)
+        response.raise_for_status()
+        json_data = response.json()
+        reward = json_data.get("reward_info", {}).get("reward", {})
+        coupon = reward.get("coupon_code")
+        reward_name = reward.get("campaign_name", "Belirtilmemiş Ödül")
+
+        if coupon:
+            return f"🎁 Kupon: {coupon} | Ödül: {reward_name}"
+    except Exception as e:
+        logging.error(f"Kupon alınırken hata: {e}")
+    return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -71,7 +106,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "messages": []
         }
 
-    # Mesaj kaydet
     if last_msg:
         user_data[uid]["messages"].append({
             "text": last_msg,
@@ -87,26 +121,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Merhaba {first_name}! {hak_kaldi} kupon hakkın var, çekiliyor...")
 
     basari = 0
+    kuponlar = []
     for _ in range(hak_kaldi):
         result = await get_coupon()
         if result:
             basari += 1
+            kuponlar.append(result)
             user_data[uid]["daily_count"] += 1
             user_data[uid]["total_count"] += 1
             save_user_data(user_data)
-            await update.message.reply_text(result)
         else:
-            await update.message.reply_text("❌ Kupon alınamadı. Limit dolmuş olabilir veya sunucu problemi var.")
             break
 
     if basari == 0:
-        await update.message.reply_text("❌ Hiç kupon alınamadı.")
+        await update.message.reply_text("❌ Hiç kupon alınamadı veya limit dolmuş olabilir.")
     else:
-        await update.message.reply_text(f"✅ Toplam {basari} kupon başarıyla alındı.")
+        # Tek mesajda tüm kuponları gönder
+        await update.message.reply_text("🎉 Kuponlar:\n" + "\n".join(kuponlar))
 
     save_user_data(user_data)
 
-# Gelen normal mesajları kaydeden handler
 async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = str(user.id)
@@ -134,7 +168,6 @@ async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
     save_user_data(user_data)
 
-# /loglar komutu - admin
 async def loglar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         await update.message.reply_text("Bu komut sadece adminler içindir.")
@@ -155,26 +188,21 @@ async def loglar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = text[:4000] + "\n...(devamı var)"
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-# /istatistik komutu - admin
 async def istatistik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         await update.message.reply_text("Bu komut sadece adminler içindir.")
         return
-
     toplam_kullanici = len(user_data)
     toplam_mesaj = sum(len(u.get("messages", [])) for u in user_data.values())
     await update.message.reply_text(f"📊 Toplam kullanıcı: {toplam_kullanici}\n💬 Toplam mesaj sayısı: {toplam_mesaj}")
 
-# /aktifkullanicilar komutu - admin
 async def aktif_kullanicilar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         await update.message.reply_text("Bu komut sadece adminler içindir.")
         return
-
     aktif = [u for u in user_data.values() if len(u.get("messages", [])) > 0]
     await update.message.reply_text(f"🔍 Mesaj atmış aktif kullanıcı sayısı: {len(aktif)}")
 
-# Günlük hakları sıfırlayan job
 def reset_daily_counts():
     for uid in user_data:
         user_data[uid]["daily_count"] = 0
