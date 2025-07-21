@@ -1,3 +1,4 @@
+
 import os
 import json
 import logging
@@ -37,27 +38,17 @@ def save_user_data(data):
 user_data = load_user_data()
 
 def escape_markdown(text):
-    if not text:
-        return ""
     escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text or "")
 
-# Kupon alma fonksiyonu (senin verdiğin requests kodundan dönüştürüldü)
 async def get_coupon():
     headers = {
         "Accept": "*/*",
-        "Accept-Language": "tr,en;q=0.9,en-GB;q=0.8,en-US;q=0.7",
-        "Connection": "keep-alive",
+        "Accept-Language": "tr,en;q=0.9",
         "Content-Type": "application/json",
         "Origin": "https://tiklagelsin.game.core.tiklaeslestir.zuzzuu.com",
         "Referer": "https://tiklagelsin.game.core.tiklaeslestir.zuzzuu.com/",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-site",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0",
-        "sec-ch-ua": '"Chromium";v="136", "Microsoft Edge";v="136", "Not.A/Brand";v="99"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"'
+        "User-Agent": "Mozilla/5.0"
     }
 
     data = {
@@ -72,11 +63,9 @@ async def get_coupon():
     try:
         response = requests.post(COUPON_URL, headers=headers, data=json.dumps(data), timeout=10)
         response.raise_for_status()
-        json_data = response.json()
-        reward = json_data.get("reward_info", {}).get("reward", {})
+        reward = response.json().get("reward_info", {}).get("reward", {})
         coupon = reward.get("coupon_code")
         reward_name = reward.get("campaign_name", "Belirtilmemiş Ödül")
-
         if coupon:
             return f"🎁 Kupon: {coupon} | Ödül: {reward_name}"
     except Exception as e:
@@ -90,9 +79,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     first_name = user.first_name or ""
     last_name = user.last_name or ""
     lang = user.language_code or ""
-    last_msg = update.message.text if update.message else ""
+    last_msg = update.message.text or ""
 
-    max_rights = MAX_PRIORITY if username in priority_users else MAX_NORMAL
+    max_hak = MAX_PRIORITY if username in priority_users else MAX_NORMAL
 
     if uid not in user_data:
         user_data[uid] = {
@@ -103,70 +92,69 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "language_code": lang,
             "daily_count": 0,
             "total_count": 0,
-            "messages": []
+            "messages": [],
+            "used_start": False
         }
 
-    if last_msg:
-        user_data[uid]["messages"].append({
-            "text": last_msg,
-            "date": datetime.utcnow().isoformat()
-        })
+    user_data[uid]["messages"].append({
+        "text": last_msg,
+        "date": datetime.utcnow().isoformat()
+    })
 
-    hak_kaldi = max_rights - user_data[uid]["daily_count"]
-    if hak_kaldi <= 0:
-        await update.message.reply_text(f"👋 {first_name}, günlük hakkın doldu! ({max_rights} kupon)")
+    if user_data[uid].get("used_start", False):
+        await update.message.reply_text("🛑 /start komutu zaten kullanıldı. Yarın tekrar deneyebilirsin.")
         save_user_data(user_data)
         return
 
-    cekilecek = min(hak_kaldi, 5)  # En fazla 5 kupon çekecek
+    kalan = max_hak - user_data[uid]["daily_count"]
+    if kalan <= 0:
+        await update.message.reply_text(f"🚫 Günlük limit doldu! ({max_hak} kupon hakkı)")
+        user_data[uid]["used_start"] = True
+        save_user_data(user_data)
+        return
 
-    await update.message.reply_text(f"Merhaba {first_name}! {cekilecek} kupon hakkın var, çekiliyor...")
+    await update.message.reply_text(f"👋 Merhaba {first_name}, {kalan} kupon çekiliyor...")
 
     kuponlar = []
-    basari = 0
-    for _ in range(cekilecek):
+    for _ in range(kalan):
         result = await get_coupon()
         if result:
-            basari += 1
             kuponlar.append(result)
             user_data[uid]["daily_count"] += 1
             user_data[uid]["total_count"] += 1
         else:
             break
 
-    if basari == 0:
-        await update.message.reply_text("❌ Hiç kupon alınamadı veya limit dolmuş olabilir.")
+    if kuponlar:
+        await update.message.reply_text("🎉 Kuponlar:" + "\n".join(kuponlar))
     else:
-        # Tüm kuponları tek mesajda topluca gönderiyoruz
-        await update.message.reply_text("🎉 Kuponlar:\n" + "\n".join(kuponlar))
+        await update.message.reply_text("❌ Kupon alınamadı.")
 
+    user_data[uid]["used_start"] = True
     save_user_data(user_data)
 
 async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = str(user.id)
-    username = user.username or f"id_{uid}"
-    first_name = user.first_name or ""
-    last_name = user.last_name or ""
-    lang = user.language_code or ""
-    text = update.message.text or ""
 
     if uid not in user_data:
         user_data[uid] = {
             "id": uid,
-            "username": username,
-            "first_name": first_name,
-            "last_name": last_name,
-            "language_code": lang,
+            "username": user.username or f"id_{uid}",
+            "first_name": user.first_name or "",
+            "last_name": user.last_name or "",
+            "language_code": user.language_code or "",
             "daily_count": 0,
             "total_count": 0,
-            "messages": []
+            "messages": [],
+            "used_start": False
         }
 
     user_data[uid]["messages"].append({
-        "text": text,
+        "text": update.message.text or "",
         "date": datetime.utcnow().isoformat()
     })
+
     save_user_data(user_data)
 
 async def loglar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -177,36 +165,28 @@ async def loglar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = []
     for uid, info in user_data.items():
         lines.append(f"🆔 {uid} | 👤 {info.get('first_name')} {info.get('last_name')} | @{info.get('username')}")
-        last_messages = info.get("messages", [])[-3:]
-        for msg in last_messages:
-            text_esc = escape_markdown(msg.get("text", ""))
+        for msg in info.get("messages", []):
             date = msg.get("date", "")
-            lines.append(f"  - [{date}] {text_esc}")
+            text = escape_markdown(msg.get("text", ""))
+            lines.append(f"  - [{date}] {text}")
         lines.append("")
 
     text = "\n".join(lines)
-    if len(text) > 4000:
-        text = text[:4000] + "\n...(devamı var)"
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(text[:4000], parse_mode=ParseMode.MARKDOWN)
 
 async def istatistik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
         await update.message.reply_text("Bu komut sadece adminler içindir.")
         return
+
     toplam_kullanici = len(user_data)
     toplam_mesaj = sum(len(u.get("messages", [])) for u in user_data.values())
-    await update.message.reply_text(f"📊 Toplam kullanıcı: {toplam_kullanici}\n💬 Toplam mesaj sayısı: {toplam_mesaj}")
-
-async def aktif_kullanicilar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_ID:
-        await update.message.reply_text("Bu komut sadece adminler içindir.")
-        return
-    aktif = [u for u in user_data.values() if len(u.get("messages", [])) > 0]
-    await update.message.reply_text(f"🔍 Mesaj atmış aktif kullanıcı sayısı: {len(aktif)}")
+    await update.message.reply_text(f"📊 Toplam kullanıcı: {toplam_kullanici}\n💬 Toplam mesaj: {toplam_mesaj}")
 
 def reset_daily_counts():
     for uid in user_data:
         user_data[uid]["daily_count"] = 0
+        user_data[uid]["used_start"] = False
     save_user_data(user_data)
     print(f"[{datetime.now()}] Günlük haklar sıfırlandı.")
 
@@ -216,14 +196,11 @@ scheduler.start()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("loglar", loglar))
     app.add_handler(CommandHandler("istatistik", istatistik))
-    app.add_handler(CommandHandler("aktifkullanicilar", aktif_kullanicilar))
-
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), log_message))
 
     app.run_polling()
