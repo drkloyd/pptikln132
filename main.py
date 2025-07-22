@@ -4,6 +4,11 @@ import logging
 import uuid
 import re
 import requests
+import threading
+import time
+import sys
+import asyncio
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 from telegram import Update
 from telegram.constants import ParseMode
@@ -23,6 +28,7 @@ priority_users = set(os.getenv("PRIORITY_USERS", "").split(","))
 
 MAX_NORMAL = 5
 MAX_PRIORITY = 20
+last_heartbeat = time.time()
 
 def load_user_data():
     if os.path.exists(USER_DATA_FILE):
@@ -72,6 +78,9 @@ async def get_coupon():
     return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global last_heartbeat
+    last_heartbeat = time.time()
+
     user = update.effective_user
     uid = str(user.id)
     username = user.username or f"id_{uid}"
@@ -133,6 +142,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_data(user_data)
 
 async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global last_heartbeat
+    last_heartbeat = time.time()
+
     user = update.effective_user
     uid = str(user.id)
 
@@ -194,17 +206,42 @@ def reset_daily_counts():
     save_user_data(user_data)
     print(f"[{datetime.now()}] Günlük haklar sıfırlandı.")
 
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), DummyHandler)
+    print(f"Dummy web server running on port {port}")
+    server.serve_forever()
+
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'Telegram bot is running!')
+
+async def watchdog():
+    global last_heartbeat
+    while True:
+        if time.time() - last_heartbeat > 300:
+            logging.warning("⚠️ Bot tepki vermiyor. Yeniden baslatiliyor...")
+            os.execv(sys.executable, ['python'] + sys.argv)
+        await asyncio.sleep(60)
+
 scheduler = BackgroundScheduler(timezone="Europe/Istanbul")
 scheduler.add_job(reset_daily_counts, "cron", hour=10, minute=10)
 scheduler.start()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    threading.Thread(target=run_dummy_server).start()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("loglar", loglar))
     app.add_handler(CommandHandler("istatistik", istatistik))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), log_message))
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(watchdog())
 
     app.run_polling()
