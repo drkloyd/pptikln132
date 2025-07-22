@@ -1,4 +1,3 @@
-
 import os
 import json
 import logging
@@ -172,6 +171,11 @@ async def loglar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("")
 
     text = "\n".join(lines)
+
+    if not text.strip():
+        await update.message.reply_text("📭 Henüz log verisi yok.")
+        return
+
     await update.message.reply_text(text[:4000], parse_mode=ParseMode.MARKDOWN)
 
 async def istatistik(update: Update, context: ContextTypes.DEFAULT_TYPE):
