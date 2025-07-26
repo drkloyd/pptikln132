@@ -25,6 +25,7 @@ ADMIN_ID = os.getenv("ADMIN_ID")
 COUPON_URL = os.getenv("COUPON_URL")
 USER_DATA_FILE = os.getenv("USER_DATA_FILE", "kullanici_sayac.json")
 priority_users = set(os.getenv("PRIORITY_USERS", "").split(","))
+banned_usernames = set(os.getenv("BANNED_USERNAMES", "").split(","))
 
 MAX_NORMAL = 5
 MAX_PRIORITY = 20
@@ -84,6 +85,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = str(user.id)
     username = user.username or f"id_{uid}"
+    
+    # ❗ Banlı kullanıcı kontrolü
+    if username in banned_usernames:
+        await update.message.reply_text("🚫 Botu kullanmanız yasaklanmıştır.")
+        return
+
     first_name = user.first_name or ""
     last_name = user.last_name or ""
     lang = user.language_code or ""
