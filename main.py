@@ -40,7 +40,8 @@ MAX_NORMAL = 5
 MAX_PRIORITY = 20
 
 # Kalıcı disk üzerine veritabanı yolu (Render için)
-DATA_PATH = Path(os.getenv("RENDER_DISK_MOUNT_PATH", "/app/data"))
+# DATA_PATH = Path(os.getenv("RENDER_DISK_MOUNT_PATH", "/app/data")) <-- ESKİ SATIR
+DATA_PATH = Path("data") # ⬅️ YENİ SATIR: Bu, projenin ana klasöründeki 'data' klasörünü işaret eder.
 DB_FILE = DATA_PATH / "users.db"
 
 def init_db():
