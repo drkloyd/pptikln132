@@ -1,254 +1,225 @@
 import os
-import json
 import logging
-import uuid
-import re
-import requests
-import threading
-import time
-import sys
 import asyncio
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import sqlite3
+from pathlib import Path
 from datetime import datetime
-from telegram import Update
-from telegram.constants import ParseMode
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
-)
-from apscheduler.schedulers.background import BackgroundScheduler
-from dotenv import load_dotenv
+from uuid import uuid4
 
+import httpx  # requests yerine
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+from apscheduler.schedulers.asyncio import AsyncIOScheduler # Asenkron uyumlu scheduler
+from dotenv import load_dotenv
+from aiohttp import web # Asenkron web sunucusu
+
+# --- Yapılandırma ve Kurulum ---
 load_dotenv()
 
+# Logger kurulumu
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
+
+# Ortam değişkenleri
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 COUPON_URL = os.getenv("COUPON_URL")
-USER_DATA_FILE = os.getenv("USER_DATA_FILE", "kullanici_sayac.json")
-priority_users = set(os.getenv("PRIORITY_USERS", "").split(","))
-banned_usernames = set(os.getenv("BANNED_USERNAMES", "").split(","))
+PRIORITY_USERS = set(os.getenv("PRIORITY_USERS", "").split(","))
+BANNED_USERNAMES = set(os.getenv("BANNED_USERNAMES", "").split(","))
 
 MAX_NORMAL = 5
 MAX_PRIORITY = 20
-last_heartbeat = time.time()
 
-def load_user_data():
-    if os.path.exists(USER_DATA_FILE):
-        with open(USER_DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+# Kalıcı disk üzerine veritabanı yolu (Render için)
+DATA_PATH = Path(os.getenv("RENDER_DISK_MOUNT_PATH", "/app/data"))
+DB_FILE = DATA_PATH / "users.db"
 
-def save_user_data(data):
-    with open(USER_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+def init_db():
+    """Veritabanını ve tabloları oluşturur."""
+    DATA_PATH.mkdir(exist_ok=True)
+    with sqlite3.connect(DB_FILE) as con:
+        cur = con.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                daily_count INTEGER DEFAULT 0,
+                total_count INTEGER DEFAULT 0,
+                used_start BOOLEAN DEFAULT 0
+            )
+        """)
+        con.commit()
+    logger.info("Veritabanı başarıyla başlatıldı.")
 
-user_data = load_user_data()
+async def get_or_create_user(user_id: str, username: str, first_name: str):
+    """Veritabanından kullanıcıyı getirir veya oluşturur."""
+    async with httpx.AsyncClient() as client: # Using async context for db operations in future if needed
+        with sqlite3.connect(DB_FILE) as con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+            db_user = cur.fetchone()
+            if not db_user:
+                cur.execute(
+                    "INSERT INTO users (id, username, first_name) VALUES (?, ?, ?)",
+                    (user_id, username, first_name)
+                )
+                con.commit()
+                logger.info(f"Yeni kullanıcı eklendi: {username} ({user_id})")
+                return {"id": user_id, "daily_count": 0, "used_start": False}
+            return {"id": db_user[0], "daily_count": db_user[3], "used_start": bool(db_user[5])}
 
-def escape_markdown(text):
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text or "")
-
-async def get_coupon():
+async def get_coupon() -> str | None:
+    """Asenkron olarak kupon kodunu alır."""
     headers = {
-        "Accept": "*/*",
-        "Accept-Language": "tr,en;q=0.9",
         "Content-Type": "application/json",
         "Origin": "https://tiklagelsin.game.core.tiklaeslestir.zuzzuu.com",
         "Referer": "https://tiklagelsin.game.core.tiklaeslestir.zuzzuu.com/",
         "User-Agent": "Mozilla/5.0"
     }
-
-    data = {
-        "game_name": "tikla-eslestir",
-        "event_name": "oyun_tamamlandi",
-        "user_id": "",
-        "session_id": str(uuid.uuid4()),
-        "user_segment": "",
-        "user_name": ""
-    }
-
-    try:
-        response = requests.post(COUPON_URL, headers=headers, data=json.dumps(data), timeout=10)
-        response.raise_for_status()
-        reward = response.json().get("reward_info", {}).get("reward", {})
-        coupon = reward.get("coupon_code")
-        reward_name = reward.get("campaign_name", "Belirtilmemiş Ödül")
-        if coupon:
-            return f"🎁 Kupon: {coupon} | Ödül: {reward_name}"
-    except Exception as e:
-        logging.error(f"Kupon alınırken hata: {e}")
+    data = {"session_id": str(uuid4())}
+    
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            response = await client.post(COUPON_URL, headers=headers, json=data)
+            response.raise_for_status()
+            reward_data = response.json().get("reward_info", {}).get("reward", {})
+            coupon = reward_data.get("coupon_code")
+            reward_name = reward_data.get("campaign_name", "Bilinmeyen Ödül")
+            if coupon:
+                return f"🎁 Kupon: `{coupon}` | Ödül: {reward_name}"
+        except httpx.RequestError as e:
+            logger.error(f"Kupon API'sine ulaşılamadı: {e}")
+        except Exception as e:
+            logger.error(f"Kupon alınırken beklenmedik bir hata oluştu: {e}")
     return None
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global last_heartbeat
-    last_heartbeat = time.time()
-
-    user = update.effective_user
-    uid = str(user.id)
-    username = user.username or f"id_{uid}"
-    
-    # ❗ Banlı kullanıcı kontrolü
-    if username in banned_usernames:
-        await update.message.reply_text("🚫 Botu kullanmanız yasaklanmıştır.")
-        return
-
-    first_name = user.first_name or ""
-    last_name = user.last_name or ""
-    lang = user.language_code or ""
-    last_msg = update.message.text or ""
-
-    max_hak = MAX_PRIORITY if username in priority_users else MAX_NORMAL
-
-    if uid not in user_data:
-        user_data[uid] = {
-            "id": uid,
-            "username": username,
-            "first_name": first_name,
-            "last_name": last_name,
-            "language_code": lang,
-            "daily_count": 0,
-            "total_count": 0,
-            "messages": [],
-            "used_start": False
-        }
-
-    user_data[uid]["messages"].append({
-        "text": last_msg,
-        "date": datetime.utcnow().isoformat()
-    })
-
-    if user_data[uid].get("used_start", False):
-        await update.message.reply_text("🛑 /start komutu zaten kullanıldı. Yarın tekrar deneyebilirsin.")
-        save_user_data(user_data)
-        return
-
-    kalan = max_hak - user_data[uid]["daily_count"]
-    if kalan <= 0:
-        await update.message.reply_text(f"🚫 Günlük limit doldu! ({max_hak} kupon hakkı)")
-        user_data[uid]["used_start"] = True
-        save_user_data(user_data)
-        return
-
-    await update.message.reply_text(f"👋 Merhaba {first_name}, {kalan} kupon çekiliyor...")
-
-    kuponlar = []
-    for _ in range(kalan):
-        result = await get_coupon()
-        if result:
-            kuponlar.append(result)
-            user_data[uid]["daily_count"] += 1
-            user_data[uid]["total_count"] += 1
-        else:
-            break
-
-    if kuponlar:
-        await update.message.reply_text("🎉 Kuponlar:" + "\n".join(kuponlar))
-    else:
-        await update.message.reply_text("❌ Kupon alınamadı.")
-
-    user_data[uid]["used_start"] = True
-    save_user_data(user_data)
-
-async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global last_heartbeat
-    last_heartbeat = time.time()
-
-    user = update.effective_user
-    uid = str(user.id)
-
-    if uid not in user_data:
-        user_data[uid] = {
-            "id": uid,
-            "username": user.username or f"id_{uid}",
-            "first_name": user.first_name or "",
-            "last_name": user.last_name or "",
-            "language_code": user.language_code or "",
-            "daily_count": 0,
-            "total_count": 0,
-            "messages": [],
-            "used_start": False
-        }
-
-    user_data[uid]["messages"].append({
-        "text": update.message.text or "",
-        "date": datetime.utcnow().isoformat()
-    })
-
-    save_user_data(user_data)
-
-async def loglar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_ID:
-        await update.message.reply_text("Bu komut sadece adminler içindir.")
-        return
-
-    lines = []
-    for uid, info in user_data.items():
-        lines.append(f"🆔 {uid} | 👤 {info.get('first_name')} {info.get('last_name')} | @{info.get('username')}")
-        for msg in info.get("messages", []):
-            date = msg.get("date", "")
-            text = escape_markdown(msg.get("text", ""))
-            lines.append(f"  - [{date}] {text}")
-        lines.append("")
-
-    text = "\n".join(lines)
-
-    if not text.strip():
-        await update.message.reply_text("📭 Henüz log verisi yok.")
-        return
-
-    await update.message.reply_text(text[:4000], parse_mode=ParseMode.MARKDOWN)
-
-async def istatistik(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN_ID:
-        await update.message.reply_text("Bu komut sadece adminler içindir.")
-        return
-
-    toplam_kullanici = len(user_data)
-    toplam_mesaj = sum(len(u.get("messages", [])) for u in user_data.values())
-    await update.message.reply_text(f"📊 Toplam kullanıcı: {toplam_kullanici}\n💬 Toplam mesaj: {toplam_mesaj}")
-
 def reset_daily_counts():
-    for uid in user_data:
-        user_data[uid]["daily_count"] = 0
-        user_data[uid]["used_start"] = False
-    save_user_data(user_data)
-    print(f"[{datetime.now()}] Günlük haklar sıfırlandı.")
+    """Tüm kullanıcıların günlük kupon hakkını sıfırlar."""
+    with sqlite3.connect(DB_FILE) as con:
+        cur = con.cursor()
+        cur.execute("UPDATE users SET daily_count = 0, used_start = 0")
+        con.commit()
+    logger.info(f"[{datetime.now()}] Günlük haklar başarıyla sıfırlandı.")
 
-def run_dummy_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), DummyHandler)
-    print(f"Dummy web server running on port {port}")
-    server.serve_forever()
 
-class DummyHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'Telegram bot is running!')
+# --- Telegram Komut Handler'ları ---
 
-async def watchdog():
-    global last_heartbeat
-    while True:
-        if time.time() - last_heartbeat > 300:
-            logging.warning("⚠️ Bot tepki vermiyor. Yeniden baslatiliyor...")
-            os.execv(sys.executable, ['python'] + sys.argv)
-        await asyncio.sleep(60)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = str(user.id)
+    username = user.username or f"id_{user_id}"
+    
+    if username in BANNED_USERNAMES:
+        await update.message.reply_text("🚫 Bu botu kullanmanız yasaklanmıştır.")
+        return
 
-scheduler = BackgroundScheduler(timezone="Europe/Istanbul")
-scheduler.add_job(reset_daily_counts, "cron", hour=10, minute=10)
-scheduler.start()
+    db_user = await get_or_create_user(user_id, username, user.first_name)
+    
+    if db_user.get("used_start", False):
+        await update.message.reply_text("🛑 Bugünlük kuponlarını zaten aldın. Yarın tekrar deneyebilirsin.")
+        return
+
+    max_hak = MAX_PRIORITY if username in PRIORITY_USERS else MAX_NORMAL
+    kalan_hak = max_hak - db_user.get("daily_count", 0)
+    
+    if kalan_hak <= 0:
+        await update.message.reply_text(f"🚫 Günlük kupon limitin doldu! ({max_hak} hak)")
+        return
+
+    await update.message.reply_text(f"👋 Merhaba {user.first_name}, senin için {kalan_hak} adet kupon alınıyor...")
+
+    tasks = [get_coupon() for _ in range(kalan_hak)]
+    results = await asyncio.gather(*tasks)
+    
+    kuponlar = [res for res in results if res]
+    
+    if kuponlar:
+        kupon_sayisi = len(kuponlar)
+        message = "🎉 İşte kuponların:\n\n" + "\n".join(kuponlar)
+        await update.message.reply_markdown(message)
+        
+        # Veritabanını güncelle
+        with sqlite3.connect(DB_FILE) as con:
+            cur = con.cursor()
+            cur.execute(
+                "UPDATE users SET daily_count = daily_count + ?, total_count = total_count + ?, used_start = 1 WHERE id = ?",
+                (kupon_sayisi, kupon_sayisi, user_id)
+            )
+            con.commit()
+    else:
+        await update.message.reply_text("❌ Maalesef şu an kupon alınamadı. Lütfen daha sonra tekrar dene.")
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin için istatistikleri gösterir."""
+    if str(update.effective_user.id) != ADMIN_ID:
+        return
+    
+    with sqlite3.connect(DB_FILE) as con:
+        cur = con.cursor()
+        cur.execute("SELECT COUNT(id), SUM(total_count) FROM users")
+        user_count, total_coupons = cur.fetchone()
+    
+    await update.message.reply_text(
+        f"📊 **Bot İstatistikleri**\n\n"
+        f"👤 Toplam Kullanıcı: {user_count or 0}\n"
+        f"🎟️ Toplam Alınan Kupon: {total_coupons or 0}"
+    )
+
+async def health_check(request):
+    """Render'ın uygulamanın canlı olup olmadığını kontrol etmesi için."""
+    logger.info("Health check endpoint'i cagirildi.")
+    return web.Response(text="OK", status=200)
+
+async def main():
+    """Botu ve web sunucusunu başlatır."""
+    init_db() # Veritabanını hazırla
+
+    # Telegram Botunu kur
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("istatistik", stats))
+
+    # Zamanlayıcıyı kur (günlük sıfırlama için)
+    scheduler = AsyncIOScheduler(timezone="Europe/Istanbul")
+    scheduler.add_job(reset_daily_counts, "cron", hour=0, minute=5)
+    
+    # Aiohttp web sunucusunu kur (health check için)
+    app = web.Application()
+    app.router.add_get("/health", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 10000)))
+
+    # Her şeyi birlikte başlat
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    scheduler.start()
+    await site.start()
+    
+    logger.info("Bot ve web sunucusu başarıyla başlatıldı!")
+    
+    # Uygulama kapatılana kadar çalışır
+    await asyncio.Event().wait()
+    
+    # Kapanış işlemleri
+    await application.updater.stop()
+    await application.stop()
+    await runner.cleanup()
+    scheduler.shutdown()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    threading.Thread(target=run_dummy_server).start()
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("loglar", loglar))
-    app.add_handler(CommandHandler("istatistik", istatistik))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), log_message))
-
-    loop = asyncio.get_event_loop()
-    loop.create_task(watchdog())
-
-    app.run_polling()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot kapatılıyor.")
