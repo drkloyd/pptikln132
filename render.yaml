@@ -1,26 +1,3 @@
-services:
-  - type: web # ⬅️ 'worker' yerine 'web' olarak değiştirildi
-    name: telegram-kupon-bot
-    runtime: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python main.py"
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
-      - key: BOT_TOKEN
-        fromSecret: BOT_TOKEN # Render arayüzünden Secret olarak eklenmeli
-      - key: ADMIN_ID
-        fromSecret: ADMIN_ID # Render arayüzünden Secret olarak eklenmeli
-      - key: COUPON_URL
-        fromSecret: COUPON_URL # Render arayüzünden Secret olarak eklenmeli
-      # Not: Priority ve Banned kullanıcıları Render arayüzünden eklemek daha güvenlidir.
-      - key: PRIORITY_USERS
-        fromSecret: PRIORITY_USERS
-      - key: BANNED_USERNAMES
-        fromSecret: BANNED_USERNAMES
-    disks:
+disks:
       - name: data
-        mountPath: /app/data # Veritabanı dosyamızın saklanacağı kalıcı alan
-    healthCheck: # ⬅️ Render'ın botu kontrol etmesi için eklendi
-      path: /health
-      initialDelaySeconds: 30
+        mountPath: data # ⬅️ Değişiklik burada. Baştaki / işaretini kaldırdık.
