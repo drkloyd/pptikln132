@@ -80,28 +80,51 @@ async def get_or_create_user(user_id: str, username: str, first_name: str):
             return {"id": db_user[0], "daily_count": db_user[3], "used_start": bool(db_user[5])}
 
 async def get_coupon() -> str | None:
-    """Asenkron olarak kupon kodunu alır."""
+    """Asenkron olarak kupon kodunu alır (Güncellenmiş API bilgileriyle)."""
+    # 1. GÜNCEL URL
+    # Bu URL'yi doğrudan kullanabilir veya Render'da Ortam Değişkeni olarak ayarlayabilirsin.
+    url = os.getenv("COUPON_URL", "https://tiklagelsin.game.api.zuzzuu.com/request_from_game/event_create/Mz2Ex38cykBsH6GjhpZ5fX7KJdSaet4nLFDAWQ9U")
+
+    # 2. GÜNCEL ve DAHA KAPSAMLI HEADERS
     headers = {
+        "Accept": "*/*",
+        "Accept-Language": "tr,en;q=0.9,en-GB;q=0.8,en-US;q=0.7",
         "Content-Type": "application/json",
         "Origin": "https://tiklagelsin.game.core.tiklaeslestir.zuzzuu.com",
         "Referer": "https://tiklagelsin.game.core.tiklaeslestir.zuzzuu.com/",
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "sec-ch-ua-platform": '"Windows"'
     }
-    data = {"session_id": str(uuid4())}
-    
-    async with httpx.AsyncClient(timeout=10.0) as client:
+
+    # 3. GÜNCEL DATA YAPISI (session_id dinamik kalmalı)
+    data = {
+        "game_name": "tikla-eslestir",
+        "event_name": "oyun_tamamlandi",
+        "user_id": "",
+        "session_id": str(uuid4()),  # Her istek için yeni ve benzersiz olmalı
+        "user_segment": "",
+        "user_name": ""
+    }
+
+    # Asenkron istek için httpx kullanmaya devam ediyoruz
+    async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            response = await client.post(COUPON_URL, headers=headers, json=data)
-            response.raise_for_status()
+            response = await client.post(url, headers=headers, json=data)
+            response.raise_for_status()  # 200 OK dışındaki durumlar için hata fırlatır
+            
             reward_data = response.json().get("reward_info", {}).get("reward", {})
             coupon = reward_data.get("coupon_code")
             reward_name = reward_data.get("campaign_name", "Bilinmeyen Ödül")
+            
             if coupon:
                 return f"🎁 Kupon: `{coupon}` | Ödül: {reward_name}"
-        except httpx.RequestError as e:
-            logger.error(f"Kupon API'sine ulaşılamadı: {e}")
+        
+        except httpx.HTTPStatusError as e:
+            # API'den gelen hatayı loglayarak sorunu daha kolay anlamamızı sağlar
+            logger.error(f"Kupon API'si hata döndü: Status {e.response.status_code}, Response: {e.response.text}")
         except Exception as e:
             logger.error(f"Kupon alınırken beklenmedik bir hata oluştu: {e}")
+            
     return None
 
 def reset_daily_counts():
