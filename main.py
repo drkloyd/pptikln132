@@ -12,6 +12,8 @@ from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
@@ -47,7 +49,6 @@ def init_db():
     DATA_PATH.mkdir(exist_ok=True)
     with sqlite3.connect(DB_FILE) as con:
         cur = con.cursor()
-        # Kullanıcı tablosu
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
@@ -58,7 +59,6 @@ def init_db():
                 used_start BOOLEAN DEFAULT 0
             )
         """)
-        # Aktivite log tablosu
         cur.execute("""
             CREATE TABLE IF NOT EXISTS activity_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,15 +90,14 @@ async def get_or_create_user(user_id: str, username: str, first_name: str):
 
 
 async def get_coupon() -> str | None:
-    """Asenkron olarak kupon kodunu alır (Güncellenmiş API bilgileriyle)."""
+    """Asenkron olarak kupon kodunu alır."""
     headers = {
         "Accept": "*/*",
-        "Accept-Language": "tr,en;q=0.9,en-GB;q=0.8,en-US;q=0.7",
+        "Accept-Language": "tr,en;q=0.9",
         "Content-Type": "application/json",
         "Origin": "https://tiklagelsin.game.core.tiklaeslestir.zuzzuu.com",
         "Referer": "https://tiklagelsin.game.core.tiklaeslestir.zuzzuu.com/",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-        "sec-ch-ua-platform": '"Windows"'
     }
     data = {
         "game_name": "tikla-eslestir",
@@ -127,24 +126,22 @@ async def get_coupon() -> str | None:
 def reset_daily_counts():
     """Tüm kullanıcıların günlük kupon hakkını sıfırlar."""
     with sqlite3.connect(DB_FILE) as con:
-        cur = con.cursor()
-        cur.execute("UPDATE users SET daily_count = 0, used_start = 0")
+        con.execute("UPDATE users SET daily_count = 0, used_start = 0")
         con.commit()
     logger.info(f"[{datetime.now()}] Günlük haklar başarıyla sıfırlandı.")
 
 
-# --- Telegram Komut Handler'ları ---
+# --- Telegram Handler'ları ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = str(user.id)
     username = user.username or f"id_{user_id}"
 
-    # /start komutu kullanımını logla
     with sqlite3.connect(DB_FILE) as con:
         con.execute(
             "INSERT INTO activity_log (user_id, username, activity) VALUES (?, ?, ?)",
-            (user_id, username, "/start komutu kullanıldı")
+            (user_id, username, "/start komutu")
         )
 
     if username in BANNED_USERNAMES:
@@ -152,14 +149,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     db_user = await get_or_create_user(user_id, username, user.first_name)
-
     if db_user.get("used_start", False):
         await update.message.reply_text("🛑 Bugünlük kuponlarını zaten aldın. Yarın tekrar deneyebilirsin.")
         return
 
     max_hak = MAX_PRIORITY if username in PRIORITY_USERS else MAX_NORMAL
     kalan_hak = max_hak - db_user.get("daily_count", 0)
-
     if kalan_hak <= 0:
         await update.message.reply_text(f"🚫 Günlük kupon limitin doldu! ({max_hak} hak)")
         return
@@ -174,20 +169,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = "🎉 İşte kuponların:\n\n" + "\n".join(kuponlar)
         await update.message.reply_markdown(message)
         with sqlite3.connect(DB_FILE) as con:
-            cur = con.cursor()
-            cur.execute(
+            con.execute(
                 "UPDATE users SET daily_count = daily_count + ?, total_count = total_count + ?, used_start = 1 WHERE id = ?",
                 (kupon_sayisi, kupon_sayisi, user_id)
             )
-            con.commit()
     else:
         await update.message.reply_text("❌ Maalesef şu an kupon alınamadı. Lütfen daha sonra tekrar dene.")
 
+async def log_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gelen normal mesajları loglar."""
+    user = update.effective_user
+    user_id = str(user.id)
+    username = user.username or f"id_{user_id}"
+    text = update.message.text
+    
+    with sqlite3.connect(DB_FILE) as con:
+        con.execute(
+            "INSERT INTO activity_log (user_id, username, activity) VALUES (?, ?, ?)",
+            (user_id, username, f'Mesaj: "{text[:50]}"') # Mesajın ilk 50 karakterini logla
+        )
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin için istatistikleri gösterir."""
-    if str(update.effective_user.id) != ADMIN_ID:
-        return
+    if str(update.effective_user.id) != ADMIN_ID: return
     with sqlite3.connect(DB_FILE) as con:
         cur = con.cursor()
         cur.execute("SELECT COUNT(id), SUM(total_count) FROM users")
@@ -198,26 +202,23 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎟️ Toplam Alınan Kupon: {total_coupons or 0}"
     )
 
-
 async def loglar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin için son aktiviteleri listeler."""
-    if str(update.effective_user.id) != ADMIN_ID:
-        return
-    message_lines = ["📝 **Son 15 Bot Aktivitesi**\n"]
+    if str(update.effective_user.id) != ADMIN_ID: return
+    message_lines = ["📝 **Son 30 Bot Aktivitesi**\n"]
     with sqlite3.connect(DB_FILE) as con:
         cur = con.cursor()
-        cur.execute("SELECT timestamp, username, activity FROM activity_log ORDER BY id DESC LIMIT 15")
+        cur.execute("SELECT timestamp, username, activity FROM activity_log ORDER BY id DESC LIMIT 30")
         logs = cur.fetchall()
     if not logs:
         await update.message.reply_text("Henüz görüntülenecek bir aktivite kaydı yok.")
         return
     for log_entry in logs:
-        timestamp = datetime.strptime(log_entry[0], '%Y-%m-%d %H:%M:%S').strftime('%d-%m-%Y %H:%M')
+        timestamp = datetime.strptime(log_entry[0], '%Y-%m-%d %H:%M:%S').strftime('%d-%m %H:%M')
         username = log_entry[1] or "bilinmiyor"
         activity = log_entry[2]
-        message_lines.append(f"`[{timestamp}]` - @{username} - {activity}")
+        message_lines.append(f"`[{timestamp}]` @{username} - {activity}")
     await update.message.reply_text("\n".join(message_lines), parse_mode="Markdown")
-
 
 # --- Ana Çalıştırma ve Web Sunucusu ---
 
@@ -225,15 +226,19 @@ async def health_check(request):
     """Render'ın uygulamanın canlı olup olmadığını kontrol etmesi için."""
     return web.Response(text="OK", status=200)
 
-
 async def main():
     """Botu ve web sunucusunu başlatır."""
     init_db()
 
     application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Komut handler'ları
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("istatistik", stats))
     application.add_handler(CommandHandler("loglar", loglar))
+    
+    # Normal mesajları loglamak için MessageHandler
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), log_text_message))
 
     scheduler = AsyncIOScheduler(timezone="Europe/Istanbul")
     scheduler.add_job(reset_daily_counts, "cron", hour=0, minute=5)
@@ -257,7 +262,6 @@ async def main():
     await application.stop()
     await runner.cleanup()
     scheduler.shutdown()
-
 
 if __name__ == "__main__":
     try:
