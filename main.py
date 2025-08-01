@@ -49,6 +49,7 @@ def init_db():
     DATA_PATH.mkdir(exist_ok=True)
     with sqlite3.connect(DB_FILE) as con:
         cur = con.cursor()
+        # Mevcut users tablosu...
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
@@ -57,6 +58,16 @@ def init_db():
                 daily_count INTEGER DEFAULT 0,
                 total_count INTEGER DEFAULT 0,
                 used_start BOOLEAN DEFAULT 0
+            )
+        """)
+        # YENİ activity_log TABLOSU
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                username TEXT,
+                activity TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
         con.commit()
